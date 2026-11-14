@@ -36,26 +36,62 @@ jobs:
         with:
           shared-key: update-download-coverage-7175
           save-if: "true"
-      - name: Verify the archive before and after the fix
+      - name: Verify the archive and exercise the failure guards
         shell: bash
         run: |
           set -euo pipefail
-          export LLVM_PROFILE_FILE="$RUNNER_TEMP/updates-%p-%m.profraw"
           source <(cargo llvm-cov show-env --sh)
-          mkdir -p "$RUNNER_TEMP/relocated"
+          export LLVM_PROFILE_FILE="$RUNNER_TEMP/profiles/updates-%p-%m.profraw"
+          mkdir -p "$RUNNER_TEMP/profiles" "$RUNNER_TEMP/relocated"
+
           filter='test(=updates::a_newer_release_is_offered_for_download)'
+          file=crates/ui-egui/tests/it/updates.rs
           cargo nextest run --locked -p pdfcraft-ui-egui --test it -E 'test(/^updates::/)' --failure-output final
           cargo nextest archive --locked -p pdfcraft-ui-egui --test it --archive-file "$RUNNER_TEMP/updates.tar.zst"
           cargo nextest run --archive-file "$RUNNER_TEMP/updates.tar.zst" --extract-to "$RUNNER_TEMP/relocated" -E 'test(/^updates::/)' --failure-output final
-          git fetch --no-tags --depth=1 https://github.com/storytold/pdfcraft.git 346d8030807d96dd5a06b7025a67e062e490fce4
-          git restore --source=FETCH_HEAD -- Cargo.lock crates/ui-egui/Cargo.toml crates/ui-egui/tests/it/updates.rs
-          cargo nextest run --locked -p pdfcraft-ui-egui --test it -E "$filter" --failure-output final
-          cargo nextest archive --locked -p pdfcraft-ui-egui --test it --archive-file "$RUNNER_TEMP/baseline.tar.zst"
-          mkdir -p "$RUNNER_TEMP/baseline"
-          set +e
-          cargo nextest run --archive-file "$RUNNER_TEMP/baseline.tar.zst" --extract-to "$RUNNER_TEMP/baseline" -E "$filter" --failure-output final 2>&1 | tee "$RUNNER_TEMP/baseline.log"
-          result=${PIPESTATUS[0]}
-          set -e
-          test "$result" -eq 100
-          grep -q 'label: "DOWNLOAD"' "$RUNNER_TEMP/baseline.log"
-          grep -q 'label: "UPDATE AND RESTART"' "$RUNNER_TEMP/baseline.log"
+          test -z "$(find "$RUNNER_TEMP/relocated" -name .rustc_info.json -print -quit)"
+          test -z "$(find "$RUNNER_TEMP/relocated" -name 'update-download-test' -print -quit)"
+          find "$RUNNER_TEMP/profiles" -name '*.profraw' -size +0c -print -quit | grep -q .
+
+          echo 'Development self-update opt-in is removed only for the child:'
+          CRAFT_UPDATE_DEV=1 cargo nextest run --archive-file "$RUNNER_TEMP/updates.tar.zst" \
+            --extract-to "$RUNNER_TEMP/relocated" --extract-overwrite -E "$filter" --failure-output final
+
+          cp "$file" "$RUNNER_TEMP/original-updates.rs"
+          check_failure() {
+            local name="$1" expected="$2"
+            local dir="$RUNNER_TEMP/$name"
+            mkdir -p "$dir"
+            cargo nextest archive --locked -p pdfcraft-ui-egui --test it --archive-file "$dir/updates.tar.zst"
+            local result=0
+            cargo nextest run --archive-file "$dir/updates.tar.zst" --extract-to "$dir/extracted" \
+              -E "$filter" --failure-output final > "$dir/run.log" 2>&1 || result=$?
+            cat "$dir/run.log"
+            test "$result" -eq 100
+            grep -Fq "$expected" "$dir/run.log"
+            test -z "$(find "$dir/extracted" -name 'update-download-test' -print -quit)"
+            cp "$RUNNER_TEMP/original-updates.rs" "$file"
+          }
+          for case in missing-marker missing-child broken-assertion; do
+            mkdir -p "$RUNNER_TEMP/$case/extracted"
+            python3 - "$file" "$case" <<'PYTHON'
+          from pathlib import Path
+          import sys
+          path, case = Path(sys.argv[1]), sys.argv[2]
+          original, replacement = {
+              'missing-marker': ('.rustc_info.json', '.not-cargo'),
+              'missing-child': ('--exact", "updates::a_newer_release_is_offered_for_download', '--exact", "updates::missing_child'),
+              'broken-assertion': ('get_by_label("DOWNLOAD")', 'get_by_label("MISSING DOWNLOAD CONTROL")'),
+          }[case]
+          text = path.read_text()
+          assert text.count(original) == 1
+          path.write_text(text.replace(original, replacement))
+          PYTHON
+            case "$case" in
+              missing-marker) check_failure "$case" 'the fixture must be detected as a Cargo build' ;;
+              missing-child) check_failure "$case" 'contains("1 passed")' ;;
+              broken-assertion) check_failure "$case" 'label: "MISSING DOWNLOAD CONTROL"' ;;
+            esac
+          done
+          cargo fmt --all -- --check
+          git diff --exit-code
