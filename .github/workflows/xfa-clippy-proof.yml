@@ -1,0 +1,56 @@
+name: XFA Clippy proof
+
+on:
+  push:
+    branches: [test/xfa-cutover-clippy]
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
+        with:
+          ref: b076417b5880bd4154bd22f00695b1d28c6bea83
+      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
+      - uses: storytold/craft-common-actions/actions/install-apt-packages@main
+        with:
+          packages: >-
+            pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxrandr-dev
+            libxi-dev libgl1-mesa-dev libgtk-3-dev qpdf poppler-utils
+      - run: rustup toolchain install stable --profile minimal --component clippy --component rustfmt --target wasm32-unknown-unknown
+      - name: Reproduce and verify the XFA lints
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 https://github.com/storytold/pdfcraft.git eead45410575e6bc69e887d744387af6a1555f35
+          git restore --source=FETCH_HEAD -- crates/xfa
+          result=0
+          cargo +stable clippy -p pdfcraft-xfa --all-targets --locked -- -D warnings \
+            > "$RUNNER_TEMP/xfa-baseline.log" 2>&1 || result=$?
+          tail -145 "$RUNNER_TEMP/xfa-baseline.log"
+          test "$result" -eq 101
+          test "$(grep -c '^error: struct update has no effect' "$RUNNER_TEMP/xfa-baseline.log")" -eq 10
+          test "$(grep -c '^error: field assignment outside of initializer' "$RUNNER_TEMP/xfa-baseline.log")" -eq 1
+          git restore --source=HEAD -- crates/xfa
+          cargo +stable clippy -p pdfcraft-xfa --all-targets --locked -- -D warnings
+          cargo +stable test -p pdfcraft-xfa --locked
+      - name: Check for follow-on workspace lint failures
+        run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
+      - name: Verify formatting, layers, assets and WebAssembly
+        if: ${{ !cancelled() }}
+        run: |
+          cargo +stable fmt --all -- --check
+          cargo +stable xtask layers
+          cargo +stable xtask assets
+          cargo +stable xtask wasm
+          git diff --exit-code
