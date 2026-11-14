@@ -1,0 +1,48 @@
+name: Update download coverage proof
+
+on:
+  push:
+    branches: [test/7175-update-download-coverage]
+
+permissions:
+  contents: read
+
+jobs:
+  proof:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: storytold/craft-common-actions/actions/checkout-craft-fonts@main
+        with:
+          ref: b076417b5880bd4154bd22f00695b1d28c6bea83
+      - uses: storytold/craft-common-actions/actions/checkout-craft-i18n@main
+      - uses: storytold/craft-common-actions/actions/install-apt-packages@main
+        with:
+          packages: >-
+            pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev
+            libxi-dev libgtk-3-dev libfontconfig1-dev libfreetype-dev libasound2-dev libsoup-3.0-dev libwebkit2gtk-4.1-dev
+            libgl1-mesa-dev mesa-vulkan-drivers
+      - run: rustup toolchain install stable --profile minimal --component llvm-tools-preview
+      - uses: step-security/taiki-e-install-action@76747d22a7567cc4438546a84f11bdf18e670ab8
+        with:
+          tool: cargo-llvm-cov,cargo-nextest@0.9.150
+      - uses: step-security/rust-cache@8871c8ba063416da7c32246932ea6ae08700453e
+        with:
+          shared-key: update-download-coverage-7175
+          save-if: "true"
+      - name: Compare Cargo output and relocated coverage archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          export LLVM_PROFILE_FILE="$RUNNER_TEMP/updates-%p-%m.profraw"
+          source <(cargo llvm-cov show-env --sh)
+          filter='test(=updates::a_newer_release_is_offered_for_download)'
+          cargo nextest run --locked -p pdfcraft-ui-egui --test it -E "$filter" --failure-output final
+          cargo nextest archive --locked -p pdfcraft-ui-egui --test it --archive-file "$RUNNER_TEMP/updates.tar.zst"
+          cargo nextest run --archive-file "$RUNNER_TEMP/updates.tar.zst" --extract-to "$RUNNER_TEMP/relocated" -E "$filter" --failure-output final
