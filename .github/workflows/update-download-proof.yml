@@ -36,13 +36,13 @@ jobs:
         with:
           shared-key: update-download-coverage-7175
           save-if: "true"
-      - name: Compare Cargo output and relocated coverage archive
+      - name: Verify fixed tests from Cargo output and relocated coverage archive
         shell: bash
         run: |
           set -euo pipefail
           export LLVM_PROFILE_FILE="$RUNNER_TEMP/updates-%p-%m.profraw"
           source <(cargo llvm-cov show-env --sh)
-          filter='test(=updates::a_newer_release_is_offered_for_download)'
+          filter='test(/^updates::/)'
           cargo nextest run --locked -p pdfcraft-ui-egui --test it -E "$filter" --failure-output final
           cargo nextest archive --locked -p pdfcraft-ui-egui --test it --archive-file "$RUNNER_TEMP/updates.tar.zst"
           cargo nextest run --archive-file "$RUNNER_TEMP/updates.tar.zst" --extract-to "$RUNNER_TEMP/relocated" -E "$filter" --failure-output final
